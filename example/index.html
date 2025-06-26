@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Wasm Memory Allocator Example</title>
+    </head>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            background-color: #000;
+            color: white;
+			font-family: Calibri, sans-serif;
+        }
+    </style>
+    <body>
+
+    </body>
+    <script>
+        let c = null; // functions we defined in C!
+        const page_size = 64 * 1024;
+        
+        // Find length of C string
+        function c_string_length(address) {
+            const start = address;
+            while (new Uint8Array(c.memory.buffer)[address] != 0) address++;
+            return address - start;
+        }
+        
+        // Convert C string to Javascript string
+        function c_string(address, length) {
+            if (length === undefined) {
+                length = c_string_length(address);
+            }
+            const bytes = new Uint8Array(c.memory.buffer).slice(address, address + length);
+            return new TextDecoder().decode(bytes);
+        }
+
+        function __wasm_panic(_desc, _message, _file, line) {
+            const desc = c_string(_desc);
+            const message = c_string(_message);
+            const file = c_string(_file);
+            const error = Error(`${message}\n(${file}:${line})`);
+            error.name = desc;
+            throw error;
+        }
+
+        function __wasm_console_log(message, value) {
+            console.log(c_string(message), value);
+        }
+
+		console.log("What is happening??");
+
+        WebAssembly.instantiateStreaming(fetch('example.wasm'), {
+            env: {
+                __wasm_console_log,
+                __wasm_panic,
+            }
+        }).then(async (wasm) => {
+            c = wasm.instance.exports; // Exported C Functions
+			console.log(c.memory);
+
+			console.log(c.init())
+
+			const p1 = document.createElement("p");
+			p1.innerText = "Before";
+			document.body.appendChild(p1);
+
+			console.log(c.say_hi());
+			
+			const p2 = document.createElement("p");
+			p2.innerText = "After";
+			document.body.appendChild(p2);
+        });
+    </script>
+</html>
