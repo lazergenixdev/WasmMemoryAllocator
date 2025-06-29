@@ -1,75 +1,273 @@
 <!DOCTYPE html>
 <html>
-    <head>
-        <title>Wasm Memory Allocator Example</title>
-    </head>
-    <style>
-        html, body {
-            height: 100%;
-            margin: 0;
-            background-color: #000;
-            color: white;
-			font-family: Calibri, sans-serif;
-        }
-    </style>
-    <body>
 
-    </body>
-    <script>
-        let c = null; // functions we defined in C!
-        const page_size = 64 * 1024;
-        
-        // Find length of C string
-        function c_string_length(address) {
-            const start = address;
-            while (new Uint8Array(c.memory.buffer)[address] != 0) address++;
-            return address - start;
-        }
-        
-        // Convert C string to Javascript string
-        function c_string(address, length) {
-            if (length === undefined) {
-                length = c_string_length(address);
-            }
-            const bytes = new Uint8Array(c.memory.buffer).slice(address, address + length);
-            return new TextDecoder().decode(bytes);
-        }
+<head>
+	<title>Wasm Memory Allocator Example</title>
+</head>
+<style>
+	html,
+	body {
+		height: 100%;
+		margin: 1em;
+		background-color: #000;
+		color: white;
+		font-family: Calibri, sans-serif;
+	}
 
-        function __wasm_panic(_desc, _message, _file, line) {
-            const desc = c_string(_desc);
-            const message = c_string(_message);
-            const file = c_string(_file);
-            const error = Error(`${message}\n(${file}:${line})`);
-            error.name = desc;
-            throw error;
-        }
+	hr {
+		border-color: #0000;
+	}
 
-        function __wasm_console_log(message, value) {
-            console.log(c_string(message), value);
-        }
+	#heap-container {
+		width: 100%;
+		height: 40px;
+		display: flex;
+		border: 2px solid #333;
+		border-radius: 5px;
+		overflow: hidden;
+		margin-top: 20px;
+		position: relative;
+	}
 
-		console.log("What is happening??");
+	#heap-info {
+		font-family: monospace;
+	}
 
-        WebAssembly.instantiateStreaming(fetch('example.wasm'), {
-            env: {
-                __wasm_console_log,
-                __wasm_panic,
-            }
-        }).then(async (wasm) => {
-            c = wasm.instance.exports; // Exported C Functions
-			console.log(c.memory);
+	.heap-block {
+		height: 100%;
+		border-right: 1px solid #000;
+		position: relative;
+		transition: box-shadow 0.2s ease, transform 0.2s ease;
+	}
 
-			console.log(c.init())
+	.heap-block:hover {
+		box-shadow: 0 0 0 3px #f1c40f;
+		/* yellow glow border */
+		transform: scaleY(0.9);
+		/* optional: slightly grow in thickness */
+		z-index: 1000;
+	}
 
-			const p1 = document.createElement("p");
-			p1.innerText = "Before";
-			document.body.appendChild(p1);
+	.heap-block.freed {
+		background-color: #bdc3c7;
+	}
 
-			console.log(c.say_hi());
-			
-			const p2 = document.createElement("p");
-			p2.innerText = "After";
-			document.body.appendChild(p2);
-        });
-    </script>
+	.heap-block.allocated {
+		background-color: #2ecc71;
+	}
+
+	.tooltip {
+		position: absolute;
+		background: #222;
+		color: #fff;
+		padding: 6px 10px;
+		border-radius: 5px;
+		font-size: 13px;
+		pointer-events: none;
+		opacity: 0;
+		transition: opacity 0.2s;
+		white-space: pre;
+		z-index: 1000;
+	}
+</style>
+
+<body>
+	<div id="heap-container"></div>
+	<div id="heap-info">8.3 MB (25 pages)</div>
+	<div id="heap-tooltip" class="tooltip"></div>
+	<h2>Allocation</h2>
+	<input type="number" id="alloc-size" placeholder="Size" min="1" value="40000" />
+	<button id="alloc-btn">Allocate</button>
+	<button id="alloc-btn-rand">Allocate Random</button>
+	<h2>Arrays</h2>
+	<button id="push">Push 10 Arrays</button>
+	<button id="pop">Pop 10 Arrays</button>
+	<p id="arrayCountElement"></p>
+	<h2></h2>
+	<button id="push-100">Push to 100 Random Arrays</button>
+	<button id="push-1000">Push to 1000 Random Arrays</button>
+	<button id="push-10000">Push to 10000 Random Arrays</button>
+	<p id="arrayTotalElement"></p>
+</body>
+<script>
+	let c = null;
+
+	function clamp(value, min, max) {
+		if (value < min) return min;
+		if (value > max) return max;
+		return value;
+	}
+
+	// Find length of C string
+	function c_string_length(address) {
+		const start = address;
+		while (new Uint8Array(c.memory.buffer)[address] != 0) address++;
+		return address - start;
+	}
+
+	// Convert C string to Javascript string
+	function c_string(address, length) {
+		if (length === undefined) {
+			length = c_string_length(address);
+		}
+		const bytes = new Uint8Array(c.memory.buffer).slice(address, address + length);
+		return new TextDecoder().decode(bytes);
+	}
+
+	function __wasm_panic(_desc, _message, _file, line) {
+		const desc = c_string(_desc);
+		const message = c_string(_message);
+		const file = c_string(_file);
+		const error = Error(`${message}\n(${file}:${line})`);
+		error.name = desc;
+		throw error;
+	}
+
+	function __wasm_console_log(message, value) {
+		console.log(c_string(message), value);
+	}
+
+	function toSizeString(byteCount) {
+		if (byteCount < 1024*1024) {
+			return `${byteCount/1024} K`;
+		}
+		if (byteCount < 1024*1024*1024) {
+			return `${byteCount/(1024*1024)} M`;
+		}
+		return `${byteCount/(1024*1024*1024)} G`;
+	}
+
+	class HeapVisualization {
+		constructor(callbacks) {
+			this.callbacks = callbacks;
+			this.container = document.getElementById("heap-container");
+			this.tooltip = document.getElementById("heap-tooltip");
+			this.refresh();
+		}
+
+		refresh() {
+			this.container.innerHTML = "";
+			this.totalSize = this.callbacks.getHeapSize();
+			document.getElementById("heap-info").innerText = `${toSizeString(this.totalSize)}`
+
+			const allocCount = this.callbacks.getAllocCount();
+			for (let i = 0; i < allocCount; i++) {
+				const offset = this.callbacks.getAllocOffset(i);
+				const size   = this.callbacks.getAllocSize(i);
+				const status = this.callbacks.getAllocStatus(i) ? 'allocated' : 'freed';
+
+				if (size == 0)
+					console.error("Size 0 at index", i);
+
+				const block = document.createElement("div");
+				block.classList.add("heap-block", status);
+				block.style.width = `${(size / this.totalSize) * 100}%`;
+
+				// Mouse events for custom tooltip
+				const tooltipText = `Index: ${i}\nOffset: ${offset}\nSize: ${size}\nStatus: ${status}`;
+				block.addEventListener("mouseenter", (e) => {
+					this.tooltip.textContent = tooltipText;
+					this.tooltip.style.opacity = 1;
+				});
+
+				block.addEventListener("mousemove", (e) => {
+					const width = parseFloat(getComputedStyle(this.tooltip).width);
+					this.tooltip.style.left = `${clamp(e.pageX - width/2, 0, window.width)}px`;
+					this.tooltip.style.top = `${NaN}px`;
+				});
+
+				block.addEventListener("mouseleave", () => {
+					this.tooltip.style.opacity = 0;
+				});
+
+				block.addEventListener("click", () => {
+					if (status === "allocated") {
+						this.free(offset);
+					}
+				});
+
+				this.container.appendChild(block);
+			}
+		}
+
+		allocate(...args) {
+			this.callbacks.alloc(...args);
+			this.refresh();
+		}
+
+		free(offset) {
+			this.callbacks.free(offset + this.callbacks.getHeapStart());
+			this.refresh();
+		}
+	}
+
+	let viz = null;
+
+	WebAssembly.instantiateStreaming(fetch('example.wasm'), {
+		env: {
+			__wasm_console_log,
+			__wasm_panic,
+		}
+	}).then(async (wasm) => {
+		c = wasm.instance.exports; // Exported C Functions
+		
+		viz = new HeapVisualization({
+			alloc: c.malloc,
+			free: c.free,
+			getHeapSize: c.heap_size,
+			getHeapStart: c.heap_start,
+			getAllocCount: c.allocation_count,
+			getAllocSize: c.allocation_size,
+			getAllocStatus: c.allocation_status,
+			getAllocOffset: c.allocation_offset,
+		}, c.heap_size());
+
+		document.getElementById("alloc-btn-rand").addEventListener("click", () => {
+			viz.allocate(Math.round(Math.random() * 1300000 + 50000));
+		});
+		
+		document.getElementById("alloc-btn").addEventListener("click", () => {
+			const sizeInput = document.getElementById("alloc-size");
+			const size = parseInt(sizeInput.value, 10);
+			if (isNaN(size) || size <= 0) {
+				alert("Please enter a valid size.");
+				return;
+			}
+			viz.allocate(size);
+		});
+		
+		document.getElementById("push").addEventListener("click", () => {
+			for (let i = 0; i < 10; ++i) c.push();
+			arrayCountElement.innerText = c.count().toString();
+			viz.refresh();
+		});
+		
+		document.getElementById("pop").addEventListener("click", () => {
+			for (let i = 0; i < 10; ++i) c.pop();
+			arrayCountElement.innerText = c.count().toString();
+			arrayTotalElement.innerText = c.total_count().toString();
+			viz.refresh();
+		});
+		
+		document.getElementById("push-100").addEventListener("click", () => {
+			for (let i = 0; i < 100; ++i)
+				c.array_push(Math.floor(Math.random() * c.count()), 0);
+			arrayTotalElement.innerText = c.total_count().toString();
+			viz.refresh();
+		});
+		document.getElementById("push-1000").addEventListener("click", () => {
+			for (let i = 0; i < 1000; ++i)
+				c.array_push(Math.floor(Math.random() * c.count()), 0);
+			arrayTotalElement.innerText = c.total_count().toString();
+			viz.refresh();
+		});
+		document.getElementById("push-10000").addEventListener("click", () => {
+			for (let i = 0; i < 10000; ++i)
+				c.array_push(Math.floor(Math.random() * c.count()), 0);
+			arrayTotalElement.innerText = c.total_count().toString();
+			viz.refresh();
+		});
+	});
+</script>
+
 </html>

@@ -2,44 +2,117 @@ extern void __wasm_console_log(const char* message, int value);
 extern void __wasm_panic(const char* desc, const char* message, const char* file, int line);
 #define __debug_print(EXPR) __wasm_console_log(#EXPR, (int)(EXPR))
 
+
+// 1. Header-Only library, just include,
+//     and define WMA_IMPLEMENTATION in at
+//     least one file.
 #define WMA_IMPLEMENTATION
 #include "../wma.h"
 
-Wma_Fixed_Heap global_heap;
 
+// 2. alloc/free functions act as a drop-in
+//     replacement for malloc and free!
+void* realloc(void* ptr, size_t size)
+{
+	return wma_realloc(ptr, size);
+}
 void* malloc(size_t size)
 {
-	void* ptr = wma_fixed_alloc(&global_heap, size);
-	__wasm_console_log("malloc", (int)ptr);
-	return ptr;
+	return wma_alloc(size);
+}
+void free(void* ptr)
+{
+	wma_free(ptr);
 }
 
-void init()
+
+//(3) Data structure is fully available,
+//     so you can see all allocations and
+//     their sizes.
+int heap_size()
 {
-	wma_create_fixed_heap(&global_heap, WMA_MB(100));
+	return (int)wma_allocator->available_size;
+}
+int heap_start()
+{
+	return (int)wma_allocator->heap_start;
+}
+int allocation_count()
+{
+	return (int)*wma_allocator->slot_count;
+}
+int allocation_size(int index)
+{
+	return (int)wma_allocator->slots[index].size;
+}
+int allocation_status(int index)
+{
+	return wma_allocator->slots[index].allocated;
+}
+int allocation_offset(int index)
+{
+	return wma_allocator->slots[index].offset;
 }
 
-int say_hi()
+
+#define DECLARE_ARRAY(TYPE) \
+typedef struct { \
+	size_t len; \
+	size_t cap; \
+	TYPE*  data; \
+} Array_ ## TYPE; \
+void grow_##TYPE(Array_ ## TYPE* array, size_t amount) \
+{ \
+	if (array->cap >= array->len + amount) \
+		return; \
+	array->cap = (array->len + amount + 1) * 3 / 2; \
+	array->data = realloc(array->data, sizeof(TYPE) * array->cap); \
+} \
+void push_##TYPE(Array_ ## TYPE* array, TYPE value) \
+{ \
+	grow_##TYPE(array, 1); \
+	array->data[array->len++] = value; \
+} \
+void pop_##TYPE(Array_ ## TYPE* array) \
+{ \
+	array->len -= 1; \
+}
+
+DECLARE_ARRAY(int)
+DECLARE_ARRAY(Array_int)
+
+Array_Array_int arrays = {0};
+
+void push(void)
 {
-	char* message = malloc(100);
-	message[0] = 'H';
-	message[1] = 'e';
-	message[2] = 'y';
-	message[3] = '!';
-	message[4] = '\0';
-	__wasm_console_log(message, 0);
-	
-	char* message2 = malloc(100);
-	message2[0] = 'O';
-	message2[1] = 'v';
-	message2[2] = 'e';
-	message2[3] = 'r';
-	message2[4] = 'r';
-	message2[5] = 'a';
-	message2[6] = 't';
-	message2[7] = 'e';
-	message2[8] = 'd';
-	message2[9] = '\0';
-	__wasm_console_log(message2, 0);
-	return 1;
+	push_Array_int(&arrays, (Array_int) {0});
+}
+void pop(void)
+{
+	if (arrays.len == 0)
+		return;
+	free(arrays.data[arrays.len-1].data);
+	pop_Array_int(&arrays);
+}
+int count(void)
+{
+	return arrays.len;
+}
+
+void array_push(int index, int value)
+{
+	push_int(&arrays.data[index], value);
+}
+void array_pop(int index)
+{
+	if (arrays.data[index].len == 0)
+		return;
+	pop_int(&arrays.data[index]);
+}
+size_t total_count(void)
+{
+	size_t sum = 0;
+	for (size_t i = 0; i < arrays.len; ++i)
+		sum += arrays.data[i].len;
+	return sum;
 }
