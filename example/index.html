@@ -69,6 +69,22 @@
 		white-space: pre;
 		z-index: 1000;
 	}
+
+	#alloc-container {
+		background-color: #111;
+		padding: 10px;
+		margin-top: 10px;
+		font-family: monospace;
+		border-radius: 5px;
+	}
+	
+	.alloc-item {
+		border: solid 1px white;
+	}
+
+	.alloc-info {
+		margin-left: 10px;
+	}
 </style>
 
 <body>
@@ -79,6 +95,7 @@
 	<input type="number" id="alloc-size" placeholder="Size" min="1" value="40000" />
 	<button id="alloc-btn">Allocate</button>
 	<button id="alloc-btn-rand">Allocate Random</button>
+	<div id="alloc-container"></div>
 	<h2>Arrays</h2>
 	<button id="push">Push 10 Arrays</button>
 	<button id="pop">Pop 10 Arrays</button>
@@ -90,6 +107,7 @@
 	<p id="arrayTotalElement"></p>
 </body>
 <script>
+	const allocationContainer = document.getElementById("alloc-container");
 	let c = null;
 
 	function clamp(value, min, max) {
@@ -114,12 +132,12 @@
 		return new TextDecoder().decode(bytes);
 	}
 
-	function __wasm_panic(_desc, _message, _file, line) {
-		const desc = c_string(_desc);
-		const message = c_string(_message);
-		const file = c_string(_file);
-		const error = Error(`${message}\n(${file}:${line})`);
-		error.name = desc;
+	function __wasm_panic(_topic, _what, _file, line) {
+		const topic = c_string(_topic);
+		const what  = c_string(_what);
+		const file  = c_string(_file);
+		const error = Error(`${what}\n(${file}:${line})`);
+		error.name = topic;
 		throw error;
 	}
 
@@ -135,6 +153,36 @@
 			return `${byteCount/(1024*1024)} M`;
 		}
 		return `${byteCount/(1024*1024*1024)} G`;
+	}
+
+	function createAllocationItem(viz, ptr, size) {
+		const item = document.createElement("div");
+		item.className = "alloc-item";
+		/*
+			<input type="button" value="free"/>
+			<span>Size: 100, Pointer: 0x1234</span>
+		*/
+
+		const freeFn = viz.callbacks.free;
+		const refreshFn = viz.refresh.bind(viz);
+
+		const freeButton = document.createElement("input");
+		freeButton.type = "button";
+		freeButton.value = "free";
+		freeButton.addEventListener("click", () => {
+			freeFn(ptr);
+			refreshFn();
+			allocationContainer.removeChild(item);
+		});
+
+		const infoSpan = document.createElement("span");
+		infoSpan.className = "alloc-info";
+		infoSpan.textContent = `Size: ${size}, Pointer: 0x${ptr.toString(16)}`;
+
+		item.appendChild(freeButton);
+		item.appendChild(infoSpan);
+
+		return item;
 	}
 
 	class HeapVisualization {
@@ -155,9 +203,6 @@
 				const offset = this.callbacks.getAllocOffset(i);
 				const size   = this.callbacks.getAllocSize(i);
 				const status = this.callbacks.getAllocStatus(i) ? 'allocated' : 'freed';
-
-				if (size == 0)
-					console.error("Size 0 at index", i);
 
 				const block = document.createElement("div");
 				block.classList.add("heap-block", status);
@@ -191,8 +236,10 @@
 		}
 
 		allocate(...args) {
-			this.callbacks.alloc(...args);
+			const ptr = this.callbacks.alloc(...args);
 			this.refresh();
+
+			allocationContainer.appendChild(createAllocationItem(this, ptr, args[0]));
 		}
 
 		free(offset) {
@@ -229,7 +276,7 @@
 		document.getElementById("alloc-btn").addEventListener("click", () => {
 			const sizeInput = document.getElementById("alloc-size");
 			const size = parseInt(sizeInput.value, 10);
-			if (isNaN(size) || size <= 0) {
+			if (isNaN(size)) {
 				alert("Please enter a valid size.");
 				return;
 			}

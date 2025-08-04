@@ -1,6 +1,10 @@
 extern void __wasm_console_log(const char* message, int value);
-extern void __wasm_panic(const char* desc, const char* message, const char* file, int line);
+extern void __wasm_panic(const char* topic, const char* what, const char* file, int line);
 #define __debug_print(EXPR) __wasm_console_log(#EXPR, (int)(EXPR))
+
+// Optional: Define wma__panic (in implementation file)
+//           to display message on fatal errors
+#define wma__panic(TOPIC,WHAT,LINE) __wasm_panic(TOPIC, WHAT, __FILE__, LINE)
 
 
 // 1. Header-Only library, just include,
@@ -26,32 +30,32 @@ void free(void* ptr)
 }
 
 
-//(3) Data structure is fully available,
+//(4) Data structure is fully available,
 //     so you can see all allocations and
 //     their sizes.
 int heap_size()
 {
-	return (int)wma_allocator->available_size;
+	return (int)wma_allocator.available_size;
 }
 int heap_start()
 {
-	return (int)wma_allocator->heap_start;
+	return (int)wma_allocator.heap_start;
 }
 int allocation_count()
 {
-	return (int)*wma_allocator->slot_count;
+	return (int)wma_allocator.slot_count;
 }
 int allocation_size(int index)
 {
-	return (int)wma_allocator->slots[index].size;
+	return (int)wma_allocator.slots[index].size;
 }
 int allocation_status(int index)
 {
-	return wma_allocator->slots[index].allocated;
+	return wma_allocator.slots[index].allocated;
 }
 int allocation_offset(int index)
 {
-	return wma_allocator->slots[index].offset;
+	return wma_allocator.slots[index].offset;
 }
 
 

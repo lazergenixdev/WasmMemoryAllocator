@@ -1,10 +1,19 @@
 // 
-//    WASM Memory Allocator -- version 1.0
-// ------------------------------------------
+//    WASM Memory Allocator -- version 1.0.1
+// --------------------------------------------
 // a general purpose memory allocator for WASM
 //
 // License: MIT (see end of file)
 // Author: lazergenixdev
+//
+// DOCUMENTATION:
+//     Simply include this header and in one file
+//     define `WMA_IMPLEMENTATION`.
+//
+//     FUNCTIONS:
+//       - wma_alloc   <=> C malloc
+//       - wma_realloc <=> C realloc
+//       - wma_free    <=> C free
 //
 #ifndef WMA_H
 #define WMA_H
@@ -14,15 +23,26 @@
 #ifndef WMA_DEF
 #define WMA_DEF extern
 #endif
+
+// fast     -- Simple allocator with a fixed number of allocations.
+// generic  -- Default allocator.
 #ifndef WMA_ALLOCATOR
-#define WMA_ALLOCATOR basic
+#define WMA_ALLOCATOR fast
+#endif
+
+#ifndef WMA_FAST_MAX_ALLOCATIONS
+#define WMA_FAST_MAX_ALLOCATIONS 65536
 #endif
 
 #define WMA__FN(A,B,C) A ## B ## C
-#define wma__allocator(A)        (&wma_global_allocator()->A)
-#define wma__realloc(A,Ptr,Size) WMA__FN(wma_, A, _realloc)(wma__allocator(A), Ptr, Size)
-#define wma__alloc(A,Size)       WMA__FN(wma_, A,   _alloc)(wma__allocator(A), Size) 
-#define wma__free(A,Ptr)         WMA__FN(wma_, A,    _free)(wma__allocator(A), Ptr)
+#define wma__realloc(A,Ptr,Size) WMA__FN(wma_, A, _realloc)(&wma_global_allocator.A, Ptr, Size)
+#define wma__alloc(A,Size)       WMA__FN(wma_, A, _alloc  )(&wma_global_allocator.A, Size) 
+#define wma__free(A,Ptr)         WMA__FN(wma_, A, _free   )(&wma_global_allocator.A, Ptr)
+
+#define wma_allocator         (wma_global_allocator.WMA_ALLOCATOR)
+#define wma_realloc(Ptr,Size) wma__realloc(WMA_ALLOCATOR, Ptr, Size)
+#define wma_alloc(Size)       wma__alloc(WMA_ALLOCATOR, Size) 
+#define wma_free(Ptr)         wma__free(WMA_ALLOCATOR, Ptr)
 
 #define WMA_PAGE_SIZE 65536
 #define WMA_INVALID ((void*)0xFFFFFFFF)
@@ -31,6 +51,7 @@ typedef struct {
 	const char* file;
 	const char* function;
 	int         line;
+	int         order;
 } Wma_Metadata;
 
 typedef struct {
@@ -43,19 +64,26 @@ typedef struct {
 	uint32_t      start;          // Start of total heap memory
 	uint32_t      heap_start;     // Start of memory that can be allocated
 	uint32_t      total_size;     // Total size of heap including overhead
-	uint32_t      available_size; // Total amount of memory that can be allocated
+	uint32_t      available_size; // Total amount of memory that can be allocated (able to grow)
 	uint32_t      slot_capacity;  // Maximum number of slots
-	uint32_t*     slot_count;     // Current number of slots
+	uint32_t      slot_count;     // Current number of slots
 	Wma_Slot*     slots;
 	uint32_t      first_free;     // Index of first free slot
+	uint32_t      allocated;      // Total size of allocated memory
 #ifdef WMA_TRACK_ALLOCATIONS
 	Wma_Metadata* metadata;       // Mirror of slots, giving extra allocation info
 	Wma_Metadata  next_metadata;  // The metadata of the next allocation
 #endif
-} Wma_Basic_Allocator;
+} Wma_Fast_Allocator;
+
+typedef struct {
+	uint32_t      heap_start; // Start of total heap memory
+	uint32_t      page_count;
+} Wma_Generic_Allocator;
 
 typedef union {
-	Wma_Basic_Allocator basic;
+	Wma_Fast_Allocator    fast;
+	Wma_Generic_Allocator generic;
 } Wma_Global_Allocator;
 
 // Size to WASM page count
@@ -63,195 +91,258 @@ typedef union {
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define wma_allocator         wma__allocator(WMA_ALLOCATOR)
-#define wma_realloc(Ptr,Size) wma__realloc(WMA_ALLOCATOR, Ptr, Size)
-#define wma_alloc(Size)       wma__alloc(WMA_ALLOCATOR, Size) 
-#define wma_free(Ptr)         wma__free(WMA_ALLOCATOR, Ptr)
+WMA_DEF Wma_Global_Allocator wma_global_allocator;
 
-WMA_DEF Wma_Global_Allocator* wma_global_allocator();
-WMA_DEF void  wma_create_basic_allocator(Wma_Basic_Allocator* out_Allocator, size_t Initial_Page_Count);
-WMA_DEF void  wma_reset_basic_allocator(Wma_Basic_Allocator* Allocator);
-WMA_DEF void  wma_grow_basic_allocator(Wma_Basic_Allocator* Allocator);
-WMA_DEF void* wma_basic_realloc(Wma_Basic_Allocator* Allocator, void* Ptr, size_t Size);
-WMA_DEF void* wma_basic_alloc(Wma_Basic_Allocator* Allocator, size_t Size);
-WMA_DEF void  wma_basic_free(Wma_Basic_Allocator* Allocator, void* Ptr);
+WMA_DEF void* wma_fast_realloc(Wma_Fast_Allocator* Allocator, void* Ptr, size_t Size);
+WMA_DEF void* wma_fast_alloc  (Wma_Fast_Allocator* Allocator, size_t Size);
+WMA_DEF void  wma_fast_free   (Wma_Fast_Allocator* Allocator, void* Ptr);
+
+WMA_DEF void* wma_generic_realloc(Wma_Generic_Allocator* Allocator, void* Ptr, size_t Size);
+WMA_DEF void* wma_generic_alloc  (Wma_Generic_Allocator* Allocator, size_t Size);
+WMA_DEF void  wma_generic_free   (Wma_Generic_Allocator* Allocator, void* Ptr);
+
+WMA_DEF void  wma_fast_allocator_create(Wma_Fast_Allocator* out_Allocator, uint32_t Max_Allocations);
+WMA_DEF void  wma_fast_allocator_reset (Wma_Fast_Allocator* Allocator);
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 
 #ifdef WMA_IMPLEMENTATION
 
-#define wma__assert(...) (void)0
+#if defined(wma__panic)
+#define WMA__PANIC(TOPIC, WHAT) wma__panic(TOPIC, WHAT, __LINE__)
+#else
+#define WMA__PANIC(TOPIC, WHAT) (void)0
+#endif
+
+// Define wma__panic to enable runtime assertions
+#if !defined(wma__assert) && defined(wma__panic)
+#define wma__assert(EXPR) \
+	do { \
+		if (!(EXPR)) { \
+			WMA__PANIC("Assertion Failed", #EXPR); \
+		} \
+	} while (0)
+#elif !defined(wma__assert)
+#define wma__assert(EXPR) (void)0
+#endif
 
 static uint32_t wma__ceil_div(uint32_t Num, uint32_t Den)
 {
 	return (Num + Den - 1) / Den;
 }
 
-WMA_DEF Wma_Global_Allocator* wma_global_allocator()
-{
-	static Wma_Global_Allocator allocator = {0};
-	return &allocator;
-}
+Wma_Global_Allocator wma_global_allocator = {0};
 
-// Basic Allocator Implementation:
+// Fast Allocator Implementation:
 // There are a fixed number of allocations allowed.
-// This limit is set such that each page can have
-// up to 1024 Allocations/Page. This does not restrict
-// how big allocations can be. Every 8 pages need a
-// single page to bookkeep the allocations.
+// Every 8 pages need a single page to bookkeep
+// the allocations.
 
-WMA_DEF void wma_create_basic_allocator(Wma_Basic_Allocator* out_Allocator, size_t Page_Count)
+WMA_DEF void wma_fast_allocator_create(Wma_Fast_Allocator* out_Allocator, uint32_t Max_Allocations)
 {
+	wma__assert(out_Allocator != NULL);
+	wma__assert(Max_Allocations != 0);
+
 	// Allocate memory required
-	int num_bookkeep_pages = wma__ceil_div(Page_Count, 4);
-	int pages_required = num_bookkeep_pages + Page_Count;
+	int num_bookkeep_pages = wma__ceil_div(Max_Allocations, WMA_PAGE_SIZE / sizeof(Wma_Slot));
+	int pages_required = num_bookkeep_pages + 1;
 	int start_page = __builtin_wasm_memory_grow(0, pages_required);
 
 	// Setup heap data structure
 	out_Allocator->start          = start_page * WMA_PAGE_SIZE;
 	out_Allocator->heap_start     = (start_page + num_bookkeep_pages) * WMA_PAGE_SIZE;
 	out_Allocator->total_size     = pages_required * WMA_PAGE_SIZE;
-	out_Allocator->available_size = Page_Count * WMA_PAGE_SIZE;
+	out_Allocator->available_size = WMA_PAGE_SIZE;
 	out_Allocator->slot_capacity  = num_bookkeep_pages * WMA_PAGE_SIZE / sizeof(Wma_Slot) - 1;
-	out_Allocator->slot_count     = (uint32_t*)out_Allocator->start;
-	out_Allocator->slots          = (Wma_Slot*)out_Allocator->start + sizeof(uint32_t);
-	wma_reset_basic_allocator(out_Allocator);
+	out_Allocator->slots          = (Wma_Slot*)out_Allocator->start;
+	wma_fast_allocator_reset(out_Allocator);
 }
 
-WMA_DEF void wma_reset_basic_allocator(Wma_Basic_Allocator* Allocator)
+WMA_DEF void wma_fast_allocator_reset(Wma_Fast_Allocator* Allocator)
 {
-	*Allocator->slot_count = 1;
+	Allocator->first_free = 0;
+	Allocator->slot_count = 1;
 	Allocator->slots[0] = (Wma_Slot) { .size = Allocator->available_size };
 }
 
-static void wma__shift_slots_up(Wma_Basic_Allocator* Allocator, uint32_t Index)
+// [i-1][ i ][i+1][i+2]
+//           ---->
+// [i-1][ i ][ i ][i+1][i+2]
+static void wma__shift_slots_up(Wma_Fast_Allocator* Allocator, uint32_t Index)
 {
-	uint32_t count = *Allocator->slot_count;
+	uint32_t count = Allocator->slot_count;
 	wma__assert(count < Allocator->slot_capacity);
 
 	for (uint32_t i = count; i > Index; --i)
 		Allocator->slots[i] = Allocator->slots[i-1];
 }
 
-WMA_DEF void* wma_basic_alloc(Wma_Basic_Allocator* Allocator, size_t Size)
+static void* wma__assign_slot(Wma_Fast_Allocator* Allocator, uint32_t Index, size_t Size)
+{
+	Wma_Slot* slot = &Allocator->slots[Index];
+
+	// Fit slot to size, if we are able to create a new free slot
+	if (slot->size > Size && Allocator->slot_count < Allocator->slot_capacity) {
+		// Make room so we can insert a new slot
+		wma__shift_slots_up(Allocator, Index+1);
+		// Create new slot with remaining space
+		Allocator->slots[Index+1] = (Wma_Slot) {
+			.offset = slot->offset + Size,
+			.size   = slot->size - Size,
+		};
+		// Resize this slot to fit allocation
+		slot->size = Size;
+		Allocator->slot_count += 1;
+	}
+
+	// Advance first free slot
+	if (Allocator->first_free == Index) {
+		Allocator->first_free += 1;
+	}
+	
+	slot->allocated = 1;
+	Allocator->allocated += slot->size;
+	return (void*)(Allocator->heap_start + slot->offset);
+}
+
+WMA_DEF void* wma_fast_alloc(Wma_Fast_Allocator* Allocator, size_t Size)
 {
 	if (Allocator->available_size == 0)
-		wma_create_basic_allocator(Allocator, 8);
+		wma_fast_allocator_create(Allocator, WMA_FAST_MAX_ALLOCATIONS);
 	
-	if (Size == 0)
-		return WMA_INVALID;
-		
-	start: (void)0;
-	uint32_t count = *Allocator->slot_count;
-	for (uint32_t i = 0; i < count; ++i)
+	for (uint32_t i = Allocator->first_free; i < Allocator->slot_count; ++i)
 	{
 		Wma_Slot* slot = &Allocator->slots[i];
 		
-		if (slot->allocated)
-			continue;
-		if (slot->size < Size)
-			continue;
-
-		if (slot->size > Size) {
-			// Make room so we can insert a new slot
-			wma__shift_slots_up(Allocator, i+1);
-			// Create new slot with remaining space
-			Allocator->slots[i+1] = (Wma_Slot) {
-				.offset = slot->offset + Size,
-				.size   = slot->size - Size,
-			};
-			// Resize this slot to fit allocation
-			slot->size = Size;
-			*Allocator->slot_count += 1;
-		}
+		if (slot->allocated)   continue;
+		if (slot->size < Size) continue;
 		
-		slot->allocated = 1;
-		return (void*)(Allocator->heap_start + slot->offset);
+		return wma__assign_slot(Allocator, i, Size);
 	}
 
-	__builtin_wasm_memory_grow(0, 1);
-	// !!! Very bad, assuming last slot is freed
-	Wma_Slot* slot = &Allocator->slots[*Allocator->slot_count-1];
-	slot->size += WMA_PAGE_SIZE;
-	Allocator->available_size += WMA_PAGE_SIZE;
-	goto start;
+	// Failed to find a slot that is both free and with enough space
+	// We have 2 options now:
+
+	// 1. Grow the last slot
+	Wma_Slot* last_slot = &Allocator->slots[Allocator->slot_count-1];
+	if (last_slot->allocated == 0) {
+		uint32_t grow_amount = Size - last_slot->size;
+		uint32_t grow_pages = wma__ceil_div(grow_amount, WMA_PAGE_SIZE);
+
+		__builtin_wasm_memory_grow(0, grow_pages);
+		Allocator->total_size     += WMA_PAGE_SIZE * grow_pages;
+		Allocator->available_size += WMA_PAGE_SIZE * grow_pages;
+
+		last_slot->size += WMA_PAGE_SIZE * grow_pages;
+		wma__assert(last_slot->size >= Size);
+
+		return wma__assign_slot(Allocator, Allocator->slot_count - 1, Size);
+	}
+
+	// 2. Grow the heap and insert a new slot
+	if (Allocator->slot_count == Allocator->slot_capacity) {
+		WMA__PANIC("WMA", "Maximum number of allocations reached");
+	}
+
+	uint32_t grow_pages = wma__ceil_div(Size, WMA_PAGE_SIZE);
+	last_slot = &Allocator->slots[Allocator->slot_count];
+	last_slot->offset = Allocator->available_size;
+	last_slot->size   = WMA_PAGE_SIZE * grow_pages;
+	Allocator->slot_count += 1;
+	wma__assert(last_slot->size >= Size);
+
+	__builtin_wasm_memory_grow(0, grow_pages);
+	Allocator->total_size     += WMA_PAGE_SIZE * grow_pages;
+	Allocator->available_size += WMA_PAGE_SIZE * grow_pages;
+
+	return wma__assign_slot(Allocator, Allocator->slot_count - 1, Size);
 }
 
-static void wma__shift_slots_down(Wma_Basic_Allocator* Allocator, uint32_t Index)
+static void wma__shift_slots_down(Wma_Fast_Allocator* Allocator, uint32_t Index)
 {
-	uint32_t count = *Allocator->slot_count;
+	uint32_t count = Allocator->slot_count;
+	wma__assert(count > 0);
 	for (uint32_t i = Index; i < count; ++i)
 		Allocator->slots[i] = Allocator->slots[i+1];
-	*Allocator->slot_count -= 1;
+	Allocator->slot_count -= 1;
 }
 
-WMA_DEF void wma__basic_free_slot(Wma_Basic_Allocator* Allocator, uint32_t Index)
+static void wma__fast_free_slot(Wma_Fast_Allocator* Allocator, uint32_t Index)
 {
 	Wma_Slot* slot = &Allocator->slots[Index];
-	uint32_t count = *Allocator->slot_count;
-
+	uint32_t count = Allocator->slot_count;
+	uint32_t index = Index;
 	slot->allocated = 0;
+	Allocator->allocated -= slot->size;
 
+	// Combine with slot to the right
 	if (Index < count-1) {
 		if (Allocator->slots[Index+1].allocated == 0) {
 			slot->size += Allocator->slots[Index+1].size;
 			wma__shift_slots_down(Allocator, Index+1);
 		}
 	}
-
+	// Combine with slot to the left
 	if (Index > 0) {
 		if (Allocator->slots[Index-1].allocated == 0) {
 			Allocator->slots[Index-1].size += slot->size;
 			wma__shift_slots_down(Allocator, Index);
+			index = Index - 1;
 		}
 	}
-}
 
-WMA_DEF void wma_basic_free(Wma_Basic_Allocator* Allocator, void* Ptr)
-{
-	uint32_t offset = (uint32_t)Ptr - Allocator->heap_start;
-
-	uint32_t count = *Allocator->slot_count;
-	for (uint32_t i = 0; i < count; ++i)
-	{
-		if (Allocator->slots[i].offset != offset)
-			continue;
-
-		wma__basic_free_slot(Allocator, i);
-		return;
+	if (Allocator->first_free > index) {
+		Allocator->first_free = index;
 	}
 }
 
-WMA_DEF void* wma_basic_realloc(Wma_Basic_Allocator* Allocator, void* Ptr, size_t Size)
+static uint32_t wma__fast_find_slot(Wma_Fast_Allocator* Allocator, void* Ptr)
 {
-	if (Size == 0)
-		return WMA_INVALID;
-	
+	uint32_t offset = (uint32_t)Ptr - Allocator->heap_start;
+	uint32_t left = 0;
+	uint32_t right = Allocator->slot_count - 1;
+	while (left <= right)
+	{
+		uint32_t mid = (left + right) / 2;
+		Wma_Slot* mid_slot = &Allocator->slots[mid];
+
+		if (mid_slot->offset < offset) {
+			left = mid + 1;
+		}
+		else if (mid_slot->offset > offset) {
+			right = mid - 1;
+		}
+		else {
+			return mid;
+		}
+	}
+	return -1;
+}
+
+WMA_DEF void wma_fast_free(Wma_Fast_Allocator* Allocator, void* Ptr)
+{
+	uint32_t index = wma__fast_find_slot(Allocator, Ptr);
+	wma__assert(index < Allocator->slot_count);
+	wma__fast_free_slot(Allocator, index);
+}
+
+WMA_DEF void* wma_fast_realloc(Wma_Fast_Allocator* Allocator, void* Ptr, size_t Size)
+{
 	if (Ptr == NULL)
-		return wma_basic_alloc(Allocator, Size);
+		return wma_fast_alloc(Allocator, Size);
 
 	// Find slot at pointer
-	uint32_t index = 0;
-	uint32_t offset = (uint32_t)Ptr - Allocator->heap_start;
-	uint32_t count = *Allocator->slot_count;
-	for (; index < count; ++index)
-	{
-		if (Allocator->slots[index].offset == offset)
-			break;
-	}
-
-	if (index == count)
-		return WMA_INVALID;
+	uint32_t index = wma__fast_find_slot(Allocator, Ptr);
+	wma__assert(index < Allocator->slot_count);
 
 	// Try to extend this slot
 	uint32_t grow_amount = Size - Allocator->slots[index].size;
+	uint32_t count = Allocator->slot_count;
 	for (;index < count-1;) {
 		Wma_Slot* next_slot = &Allocator->slots[index+1];
 		
-		if (next_slot->allocated)
-			break;
-		if (next_slot->size < grow_amount)
-			break;
+		if (next_slot->allocated)          break;
+		if (next_slot->size < grow_amount) break;
 			
 		next_slot->size -= grow_amount;
 		if (next_slot->size == 0) {
@@ -266,8 +357,8 @@ WMA_DEF void* wma_basic_realloc(Wma_Basic_Allocator* Allocator, void* Ptr, size_
 	}
 
 	// Extending failed, so free this slot and allocate another
-	wma__basic_free_slot(Allocator, index);
-	return wma_basic_alloc(Allocator, Size);
+	wma__fast_free_slot(Allocator, index);
+	return wma_fast_alloc(Allocator, Size);
 }
 
 #endif
@@ -279,14 +370,17 @@ WMA_DEF void* wma_basic_realloc(Wma_Basic_Allocator* Allocator, void* Ptr, size_
 //     Very simple allocator implemented, just to get a baseline. There are
 //     definitely better ways to implement a heap allocator.
 //
+// version 1.0.1 (2025.8.3)
+//     - Rename basic -> fast
+//     - fast: allocating more pages when full
+//     - fast: binary search on free and realloc
+//     - Added 'generic' allocator
+//     - generic: no allocation limit, also not implemented
+//
 // Roadmap (no plans for when):
-//  - Improve basic allocator
-//      - allocating more pages when full
-//      - binary search (free/realloc)
-//      - free list
-//  - Implement allocation tracking (needed?)
-//  - Add another type of allocator
 //  - Measure performance
+//  - Implement allocation alignment?
+//  - Implement allocation tracking (needed?)
 //
 
 //
