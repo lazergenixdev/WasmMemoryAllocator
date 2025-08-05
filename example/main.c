@@ -6,6 +6,9 @@ extern void __wasm_panic(const char* topic, const char* what, const char* file, 
 //           to display message on fatal errors
 #define wma__panic(TOPIC,WHAT,LINE) __wasm_panic(TOPIC, WHAT, __FILE__, LINE)
 
+// Optional: Define which allocator to use
+#define WMA_ALLOCATOR fast
+
 
 // 1. Header-Only library, just include,
 //     and define WMA_IMPLEMENTATION in at
@@ -33,6 +36,7 @@ void free(void* ptr)
 //(4) Data structure is fully available,
 //     so you can see all allocations and
 //     their sizes.
+#if WMA_USING_ALLOCATOR(fast)
 int heap_size()
 {
 	return (int)wma_allocator.available_size;
@@ -57,7 +61,14 @@ int allocation_offset(int index)
 {
 	return wma_allocator.slots[index].offset;
 }
-
+#else
+int heap_size() { return 0; }
+int heap_start() { return 0; }
+int allocation_count() { return 0; }
+int allocation_size(int index) { return 0; }
+int allocation_status(int index) { return 0; }
+int allocation_offset(int index) { return 0; }
+#endif
 
 #define DECLARE_ARRAY(TYPE) \
 typedef struct { \
@@ -119,4 +130,25 @@ size_t total_count(void)
 	for (size_t i = 0; i < arrays.len; ++i)
 		sum += arrays.data[i].len;
 	return sum;
+}
+
+void test()
+{
+	const int N = 1000;
+
+	Array_int array = {0};
+	for (int i = 1; i <= N; ++i) {
+		push_int(&array, i);
+
+		int sum = 0;
+		for (int i = 0; i < array.len; ++i)
+			sum += array.data[i];
+		
+		int n = i;
+		__debug_print(array.data);
+		__debug_print(n * (n+1) / 2);
+		__debug_print(sum);
+
+		wma__assert(n * (n+1) / 2 == sum);
+	}
 }

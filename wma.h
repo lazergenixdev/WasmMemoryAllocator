@@ -1,5 +1,5 @@
 // 
-//    WASM Memory Allocator -- version 1.0.1
+//    WASM Memory Allocator -- version 1.1.0
 // --------------------------------------------
 // a general purpose memory allocator for WASM
 //
@@ -24,12 +24,27 @@
 #define WMA_DEF extern
 #endif
 
+#define WMA_PAGE_SIZE 65536             // ~ Fixed page size for WASM 
+#define WMA_INVALID ((void*)0xFFFFFFFF) // ~ Pointer that will always be invalid
+
+// ~ Set which allocator to use as the global allocator
 // fast     -- Simple allocator with a fixed number of allocations.
-// generic  -- Default allocator.
+//          -- Allocations may be of any size.
+//          -- ! Does not work with external use of `memory_grow`.
+// generic  -- Default allocator, unlimited allocations of any size.
 #ifndef WMA_ALLOCATOR
-#define WMA_ALLOCATOR fast
+#define WMA_ALLOCATOR generic
 #endif
 
+#define WMA__fast    0
+#define WMA__generic 1
+#define WMA__COMBINE(A,B) A ## B
+#define WMA__COMBINE2(A,B) WMA__COMBINE(A,B)
+
+// ~ Determine which allocator is being used at compile-time
+#define WMA_USING_ALLOCATOR(NAME) WMA__COMBINE2(WMA__, WMA_ALLOCATOR) == WMA__COMBINE(WMA__, NAME)
+
+// ~ Set maximum number of allocations for fast allocator
 #ifndef WMA_FAST_MAX_ALLOCATIONS
 #define WMA_FAST_MAX_ALLOCATIONS 65536
 #endif
@@ -39,13 +54,11 @@
 #define wma__alloc(A,Size)       WMA__FN(wma_, A, _alloc  )(&wma_global_allocator.A, Size) 
 #define wma__free(A,Ptr)         WMA__FN(wma_, A, _free   )(&wma_global_allocator.A, Ptr)
 
+// ~ Access the allocator, and each of it's corresponding functions
 #define wma_allocator         (wma_global_allocator.WMA_ALLOCATOR)
 #define wma_realloc(Ptr,Size) wma__realloc(WMA_ALLOCATOR, Ptr, Size)
 #define wma_alloc(Size)       wma__alloc(WMA_ALLOCATOR, Size) 
 #define wma_free(Ptr)         wma__free(WMA_ALLOCATOR, Ptr)
-
-#define WMA_PAGE_SIZE 65536
-#define WMA_INVALID ((void*)0xFFFFFFFF)
 
 typedef struct {
 	const char* file;
@@ -76,15 +89,32 @@ typedef struct {
 #endif
 } Wma_Fast_Allocator;
 
+typedef struct Wma_Region {
+	uint32_t size:31;
+	uint32_t used:1;
+	struct Wma_Region* prev;
+	struct Wma_Region* next;
+} Wma_Region;
+
 typedef struct {
-	uint32_t      heap_start; // Start of total heap memory
-	uint32_t      page_count;
+	Wma_Region* heads[64];
+	Wma_Region* tails[64];
 } Wma_Generic_Allocator;
 
 typedef union {
 	Wma_Fast_Allocator    fast;
 	Wma_Generic_Allocator generic;
 } Wma_Global_Allocator;
+
+typedef struct Wma_Arena_Block {
+	struct Wma_Arena_Block* prev;
+} Wma_Arena_Block;
+
+typedef struct {
+	uint32_t offset;
+	uint32_t block_size;
+	Wma_Arena_Block* current;
+} Wma_Arena_Allocator;
 
 // Size to WASM page count
 #define WMA_MB(AMOUNT) (16*(AMOUNT))
@@ -101,8 +131,14 @@ WMA_DEF void* wma_generic_realloc(Wma_Generic_Allocator* Allocator, void* Ptr, s
 WMA_DEF void* wma_generic_alloc  (Wma_Generic_Allocator* Allocator, size_t Size);
 WMA_DEF void  wma_generic_free   (Wma_Generic_Allocator* Allocator, void* Ptr);
 
-WMA_DEF void  wma_fast_allocator_create(Wma_Fast_Allocator* out_Allocator, uint32_t Max_Allocations);
-WMA_DEF void  wma_fast_allocator_reset (Wma_Fast_Allocator* Allocator);
+WMA_DEF void wma_arena_allocator_create (Wma_Arena_Allocator* out_Allocator, uint32_t Page_Count);
+WMA_DEF void wma_arena_allocator_destroy(Wma_Arena_Allocator* Allocator);
+
+WMA_DEF void* wma_arena_alloc   (Wma_Arena_Allocator* Allocator, size_t Size);
+WMA_DEF void  wma_arena_free_all(Wma_Arena_Allocator* Allocator);
+WMA_DEF void  wma_arena_free    (Wma_Arena_Allocator* Allocator, void* Ptr);
+
+// Note: Arenas can ONLY call free() on the last item allocated, is also not very useful.
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -131,6 +167,24 @@ static uint32_t wma__ceil_div(uint32_t Num, uint32_t Den)
 	return (Num + Den - 1) / Den;
 }
 
+static uint32_t wma__min(uint32_t A, uint32_t B)
+{
+	return A < B ? A : B;
+}
+
+static uint32_t wma__max(uint32_t A, uint32_t B)
+{
+	return A < B ? B : A;
+}
+
+static void wma__memory_copy(void* Dst, void* Src, size_t Size)
+{
+	for (int i = 0; i < Size; ++i)
+	{
+		((uint8_t*)Dst)[i] = ((uint8_t*)Src)[i];
+	}
+}
+
 Wma_Global_Allocator wma_global_allocator = {0};
 
 // Fast Allocator Implementation:
@@ -138,7 +192,14 @@ Wma_Global_Allocator wma_global_allocator = {0};
 // Every 8 pages need a single page to bookkeep
 // the allocations.
 
-WMA_DEF void wma_fast_allocator_create(Wma_Fast_Allocator* out_Allocator, uint32_t Max_Allocations)
+static void wma_fast_allocator_reset(Wma_Fast_Allocator* Allocator)
+{
+	Allocator->first_free = 0;
+	Allocator->slot_count = 1;
+	Allocator->slots[0] = (Wma_Slot) { .size = Allocator->available_size };
+}
+
+static void wma_fast_allocator_create(Wma_Fast_Allocator* out_Allocator, uint32_t Max_Allocations)
 {
 	wma__assert(out_Allocator != NULL);
 	wma__assert(Max_Allocations != 0);
@@ -156,13 +217,6 @@ WMA_DEF void wma_fast_allocator_create(Wma_Fast_Allocator* out_Allocator, uint32
 	out_Allocator->slot_capacity  = num_bookkeep_pages * WMA_PAGE_SIZE / sizeof(Wma_Slot) - 1;
 	out_Allocator->slots          = (Wma_Slot*)out_Allocator->start;
 	wma_fast_allocator_reset(out_Allocator);
-}
-
-WMA_DEF void wma_fast_allocator_reset(Wma_Fast_Allocator* Allocator)
-{
-	Allocator->first_free = 0;
-	Allocator->slot_count = 1;
-	Allocator->slots[0] = (Wma_Slot) { .size = Allocator->available_size };
 }
 
 // [i-1][ i ][i+1][i+2]
@@ -336,7 +390,8 @@ WMA_DEF void* wma_fast_realloc(Wma_Fast_Allocator* Allocator, void* Ptr, size_t 
 	wma__assert(index < Allocator->slot_count);
 
 	// Try to extend this slot
-	uint32_t grow_amount = Size - Allocator->slots[index].size;
+	uint32_t old_size = Allocator->slots[index].size;
+	uint32_t grow_amount = Size - old_size;
 	uint32_t count = Allocator->slot_count;
 	for (;index < count-1;) {
 		Wma_Slot* next_slot = &Allocator->slots[index+1];
@@ -358,7 +413,192 @@ WMA_DEF void* wma_fast_realloc(Wma_Fast_Allocator* Allocator, void* Ptr, size_t 
 
 	// Extending failed, so free this slot and allocate another
 	wma__fast_free_slot(Allocator, index);
-	return wma_fast_alloc(Allocator, Size);
+	void* ptr = wma_fast_alloc(Allocator, Size);
+	wma__memory_copy(ptr, Ptr, old_size);
+	return ptr;
+}
+
+static int wma__bucket_index(size_t Size)
+{
+	if (Size < 128) return (Size >> 3) - 1;
+	int clz = __builtin_clz(Size);
+	return (clz > 19)
+		?          110 - (clz<<2) + ((Size >> (29-clz)) ^ 4)
+		: wma__min( 71 - (clz<<1) + ((Size >> (30-clz)) ^ 2), 63);
+}
+
+static int wma__regions_are_adjacent(Wma_Region* Left, Wma_Region* Right)
+{
+	return (uint32_t)(Left + 1) + Left->size == (uint32_t)Right;
+}
+
+static void* wma__generic_try_allocate(Wma_Generic_Allocator* Allocator, uint32_t Bucket_Index, Wma_Region* Region, size_t Size)
+{
+	if (Region->size < Size)
+		return WMA_INVALID;
+	
+	if (Region->size > Size + sizeof(Wma_Region)) {
+		Wma_Region* new_region = (void*)((uint32_t)(Region + 1) + Size);
+		new_region->size = Region->size - Size - sizeof(Wma_Region);
+		new_region->prev = Region;
+		new_region->next = Region->next;
+		Region->next = new_region;
+		Region->size = Size;
+	
+		wma__assert(wma__regions_are_adjacent(Region, new_region));
+	}
+
+	// Connect the two free regions inbetween
+	if (Region->prev) {
+		Region->prev->next = Region->next;
+	}
+	else {
+		Allocator->heads[Bucket_Index] = Region->next;
+	}
+	if (Region->next) {
+		Region->next->prev = Region->prev;
+	}
+	else {
+		Allocator->tails[Bucket_Index] = Region->prev;
+	}
+
+	Region->used = 1;
+	return Region + 1;
+}
+
+WMA_DEF void* wma_generic_alloc(Wma_Generic_Allocator* Allocator, size_t Size)
+{
+    int bucket_index = wma__bucket_index(wma__max(Size, 8));
+
+    Wma_Region* region = Allocator->heads[bucket_index];
+    while (region)
+	{
+		void* ptr = wma__generic_try_allocate(Allocator, bucket_index, region, Size);	
+		if (ptr != WMA_INVALID)
+			return ptr;
+
+		region = region->next;
+    }
+
+	uint32_t pages_required = wma__ceil_div(Size + sizeof(Wma_Region), WMA_PAGE_SIZE);
+	uint32_t start_page = __builtin_wasm_memory_grow(0, pages_required);
+	region = (void*)(start_page * WMA_PAGE_SIZE);
+	region->size = pages_required * WMA_PAGE_SIZE - sizeof(Wma_Region);
+	region->used = 0;
+	region->prev = NULL;
+	region->next = NULL;
+
+	if (Allocator->heads[bucket_index] == NULL) {
+		Allocator->heads[bucket_index] = region;
+		Allocator->tails[bucket_index] = region;
+	}
+	else {
+		Wma_Region* last = Allocator->tails[bucket_index];
+		region->prev = last;
+		last->next = region;
+		Allocator->tails[bucket_index] = region;
+	}
+
+    return wma__generic_try_allocate(Allocator, bucket_index, region, Size);
+}
+
+static void* wma__generic_try_extend(Wma_Generic_Allocator* Allocator, uint32_t Bucket_Index, Wma_Region* Region)
+{
+	return WMA_INVALID;
+}
+
+WMA_DEF void* wma_generic_realloc(Wma_Generic_Allocator* Allocator, void* Ptr, size_t Size)
+{
+	if (Ptr == NULL)
+		return wma_generic_alloc(Allocator, Size);
+
+	Wma_Region* region = (void*)((uint32_t)Ptr - sizeof(Wma_Region));
+    wma__assert(region->used == 1);
+	int bucket_index = wma__bucket_index(wma__max(region->size, 8));
+	uint32_t old_size = region->size;
+
+	if (Size < region->size) {
+		// too easy xD
+		return Ptr;
+	}
+
+	if (Size > region->size) {
+		void* ptr = wma__generic_try_extend(Allocator, bucket_index, region);
+		if (ptr != WMA_INVALID)
+			return ptr;
+	}
+
+	wma_generic_free(Allocator, Ptr);
+	void* ptr = wma_generic_alloc(Allocator, Size);
+	wma__memory_copy(ptr, Ptr, old_size);
+	return ptr;
+}
+
+static void wma__combine_regions(Wma_Generic_Allocator* Allocator, uint32_t Bucket_Index, Wma_Region* Region)
+{
+	if (Region->prev && wma__regions_are_adjacent(Region->prev, Region)) {
+		Region->prev->size += Region->size + sizeof(Wma_Region);
+		Region->prev->next = Region->next;
+		Region->next->prev = Region->prev;
+		if (!Region->next) {
+			Allocator->tails[Bucket_Index] = Region->prev;
+		}
+		Region = Region->prev; // prev now replaces this region
+	}
+	
+	if (Region->next && wma__regions_are_adjacent(Region, Region->next)) {
+		Region->size += Region->next->size + sizeof(Wma_Region);
+		if (Region->next->next) {
+			Region->next->next->prev = Region;
+		}
+		else {
+			Allocator->tails[Bucket_Index] = Region;
+		}
+		Region->next = Region->next->next;
+	}
+}
+
+WMA_DEF void wma_generic_free(Wma_Generic_Allocator* Allocator, void* Ptr)
+{
+	Wma_Region* region = (void*)((uint32_t)Ptr - sizeof(Wma_Region));
+    wma__assert(region->used == 1);
+	int bucket_index = wma__bucket_index(wma__max(region->size, 8));
+
+	region->used = 0;
+
+	Wma_Region* left = region->prev;
+	while (left)
+	{
+		if (left->used == 0) break;
+		left->next = region;
+		left = left->prev;
+	}
+	
+	Wma_Region* right = region->next;
+	while (right)
+	{
+		if (right->used == 0) break;
+		right->prev = region;
+		right = right->next;
+	}
+
+	region->prev = left;
+	region->next = right;
+
+	if (left) {
+		left->next = region;
+	}
+	else {
+		Allocator->heads[bucket_index] = region;
+	}
+	if (right) {
+		right->prev = region;
+	}
+	else {
+		Allocator->tails[bucket_index] = region;
+	}
+
+	wma__combine_regions(Allocator, bucket_index, region);
 }
 
 #endif
@@ -377,10 +617,21 @@ WMA_DEF void* wma_fast_realloc(Wma_Fast_Allocator* Allocator, void* Ptr, size_t 
 //     - Added 'generic' allocator
 //     - generic: no allocation limit, also not implemented
 //
+// version 1.1.0 (2025.8.4)
+//     - fast: fix problem in realloc where memory would not get copied
+//     - generic: need to implement memory shrinking with realloc
+//	   - generic: need to implement memory extension with realloc
+//
 // Roadmap (no plans for when):
-//  - Measure performance
-//  - Implement allocation alignment?
-//  - Implement allocation tracking (needed?)
+//     - Measure performance
+//     - Implement memory arenas!!
+//     - Implement allocation alignment?
+//     - Implement allocation tracking (needed?)
+//
+// Notes:
+//     For debugging, I think it would be nice to be able to use
+//     Javascript to hold metadata for each allocation and tracking.
+//     That way there won't be any memory corruption (hopefully).
 //
 
 //
